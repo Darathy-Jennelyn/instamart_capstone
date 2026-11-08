@@ -786,3 +786,237 @@ The retention list demonstrates how customer risk scores can help prioritise ret
 - `outputs/retention_list.csv`
 
 **Script:** `b8_model_interpretation.py`
+
+PART C
+
+### C1 – Input Guardrails
+
+Implemented input validation before sending support tickets to the mock LLM.
+
+- Used the provided `est_tokens()` function to estimate the token count of each ticket.
+- Set the maximum input token limit to 400.
+- Empty or whitespace-only tickets were marked as `skipped_empty`.
+- Tickets exceeding 400 estimated tokens were marked as `flagged_long`.
+- All remaining tickets were marked as `eligible`.
+- Original CSV order was preserved.
+
+**Results:**
+
+| Status | Ticket Count |
+|---|---:|
+| Eligible | 156 |
+| Skipped empty | 4 |
+| Flagged long | 4 |
+| **Total** | **164** |
+
+Each of the four long tickets had an estimated token count of 734.
+
+**Output:** `outputs/c1_input_guardrails.csv`
+
+### C2 – PII Redaction
+
+Implemented Personally Identifiable Information (PII) redaction to ensure sensitive information is removed before sending ticket text to the mock LLM.
+
+The following regular expressions were applied in the required order:
+
+1. Email addresses were replaced with `[EMAIL]`.
+2. Phone numbers were replaced with `[PHONE]`.
+3. Order IDs were replaced with `[ORDER_ID]`.
+
+The original ticket text was preserved, and the redacted text was stored in a separate `redacted_text` column.
+
+**Redaction Results:**
+
+| PII Type | Replacements |
+|---|---:|
+| Email addresses | 55 |
+| Phone numbers | 91 |
+| Order IDs | 132 |
+| **Total** | **278** |
+
+A verification check was performed after redaction. No email addresses, phone numbers, or order IDs remained in the redacted text.
+
+**Output:** `outputs/c2_pii_redaction.csv`
+
+### C3 – Two Prompts
+
+Created two system prompts for customer support ticket classification.
+
+1. **Zero-shot prompt:** Contains classification instructions, descriptions of the four categories (billing, delivery, technical and fraud), and the required JSON output format. It does not contain examples.
+2. **Few-shot prompt:** Contains the same classification instructions and JSON output format, along with four labelled examples covering all four categories.
+
+Both prompts instruct the model to classify tickets using the `CLASSIFY` instruction and return JSON-only responses in the following format:
+
+```json
+{"category": "...", "reason": "..."}
+```
+
+**Verification:** Both prompts were created successfully. The zero-shot prompt does not contain `EXAMPLES:`, while the few-shot prompt includes `EXAMPLES:` and four labelled examples.
+
+### C4 – Resilient Calls
+
+Implemented a retry function to handle transient errors during model calls.
+
+- Used `mock_llm.TransientLLMError` to identify temporary model failures.
+- Allowed a maximum of 3 retries after the initial attempt.
+- Implemented exponential backoff with jitter using `BASE_DELAY = 0.05`.
+- Logged the ticket ID, retry number and wait time for each retry.
+- Reset the mock LLM immediately before processing all eligible tickets.
+- Processed only eligible tickets using the redacted ticket text.
+
+**Results:**
+- Eligible tickets: 156
+- Successful calls: 156
+- Failed tickets: 0
+- Transient errors: 19
+- Recovered errors: 19
+
+All 19 transient errors were successfully recovered through retries.
+
+**Output:** `outputs/c4_resilient_calls.csv`
+
+### C5 – Validate Answers (4 marks)
+
+The model responses generated in C4 were validated to ensure that only supported categories were accepted.
+
+**Validation approach:**
+
+1. First, each model response was parsed using Python's `json.loads()`.
+2. If the JSON was valid and the category belonged to the allowed categories (`billing`, `delivery`, `technical`, `fraud`), it was marked as `classified_json`.
+3. If JSON parsing failed, a keyword-based fallback was used. Lowercase words were extracted using `re.findall(r"[a-z]+", text.lower())`.
+4. If exactly one allowed category was found, the response was marked as `classified_keyword`.
+5. Responses with invalid JSON, unsupported categories, or zero/multiple matching keywords were marked as `flagged_invalid_output` for human review.
+
+**Results:**
+
+| Validation Status | Count |
+|---|---:|
+| classified_json | 135 |
+| classified_keyword | 12 |
+| flagged_invalid_output | 9 |
+| **Total** | **156** |
+
+A total of 147 responses were successfully classified, while 9 responses were flagged for human review.
+
+**Output file:** `outputs/c5_validated_answers.csv`
+
+The original model responses were retained alongside the validated category, reason, and validation status.
+
+### C6 – Compare Zero-shot and Few-shot (3 marks)
+
+Two classification experiments were performed using the same 156 eligible support tickets, without applying a token budget.
+
+**Comparison results:**
+
+| Metric | Zero-shot | Few-shot |
+|---|---:|---:|
+| Tickets classified | 147 | 147 |
+| Correct predictions | 126 | 147 |
+| Accuracy | 85.7% | 100% |
+| Total tokens | 16,888 | 32,800 |
+| Tokens per classified ticket | 114.88 | 223.13 |
+
+**Zero-shot confusion table:**
+
+| Actual Category | Billing | Delivery | Fraud | Technical |
+|---|---:|---:|---:|---:|
+| Billing | 38 | 0 | 0 | 0 |
+| Delivery | 0 | 36 | 0 | 0 |
+| Fraud | 11 | 0 | 23 | 0 |
+| Technical | 10 | 0 | 0 | 29 |
+
+**Observation:**
+
+Zero-shot prompting achieved 85.7% accuracy, with 21 incorrect classifications. Most errors occurred when fraud and technical tickets were classified as billing.
+
+Few-shot prompting achieved 100% accuracy on all 147 successfully classified tickets. Although it consumed approximately 94% more tokens than zero-shot prompting, the improvement in classification accuracy makes the additional token cost worthwhile for this customer support triage application.
+
+**Token Cost and Accuracy Comparison**
+
+The few-shot prompt used 32,800 tokens for 147 classified tickets, averaging 223.13 tokens per ticket. The zero-shot prompt used 16,888 tokens, averaging 114.88 tokens per ticket.
+
+Therefore, few-shot classification used approximately 94% more tokens per ticket. However, its accuracy improved from 85.7% to 100%. This demonstrates the trade-off between token cost and classification accuracy.
+
+**Output files:**
+
+- `outputs/c6_model_comparison.csv`
+- `outputs/c6_zero_shot_confusion.csv`
+- `outputs/c6_zero_shot_results.csv`
+- `outputs/c6_few_shot_results.csv`
+
+### C7 – Budget, Routing and Final Output
+
+**Objective:** Demonstrate token budget handling and create the final ticket triage output using few-shot classification and customer segmentation.
+
+**1. Token Budget Demonstration**
+
+- Used the zero-shot prompt with an initial token budget of 6,000.
+- Checked the running token usage before each model call.
+- Tickets that could not be processed after budget exhaustion were marked as `budget_exhausted` and sent for human review.
+- The budget demonstration used 6,062 tokens and identified 100 budget-exhausted tickets.
+
+Output: `outputs/triage_budget_demo.csv`
+
+**2. Final Few-shot Classification**
+
+- Used the few-shot prompt with a token budget of 100,000.
+- Processed all 164 tickets, sending only eligible tickets to the model.
+- Used the redacted ticket text to avoid exposing personal information.
+- Validated model responses using the validation function developed in C5.
+
+Results:
+
+| Status | Tickets |
+|---|---:|
+| classified_json | 135 |
+| classified_keyword | 12 |
+| flagged_invalid_output | 9 |
+| skipped_empty | 4 |
+| flagged_long | 4 |
+| **Total** | **164** |
+
+Total tokens used: 32,800.
+
+**3. Customer Routing**
+
+Customer segmentation information was loaded from `outputs/customer_segments.csv` and joined using `customer_id`.
+
+The following routing rules were applied:
+
+- Invalid, empty, long, failed and budget-exhausted tickets were sent to `human_review`.
+- Fraud tickets were sent to `security_team` with HIGH priority.
+- Valid non-fraud tickets from premium customers were sent to `premium_desk` with HIGH priority.
+- Other valid tickets were sent to `support_queue` with NORMAL priority.
+
+Final routing results:
+
+| Route | Tickets |
+|---|---:|
+| support_queue | 102 |
+| security_team | 34 |
+| human_review | 17 |
+| premium_desk | 11 |
+| **Total** | **164** |
+
+**4. Final Output**
+
+The final output contains the following columns:
+
+`ticket_id`, `customer_id`, `status`, `category`, `segment_name`, `priority`, `route`, `tokens_used`
+
+**Validation and Human Review**
+
+Model responses were checked using the validation rules developed in C5.
+
+- 135 responses were accepted through JSON validation (`classified_json`).
+- 12 responses were accepted through keyword matching (`classified_keyword`).
+- 9 responses were flagged as invalid model outputs.
+- 4 empty tickets and 4 long tickets were not sent to the model.
+
+The 147 successfully classified tickets were routed using the classification and customer-segment rules. The remaining 17 tickets were sent to `human_review`.
+
+The human-review group therefore includes invalid model responses, empty tickets and long tickets. These tickets were not treated as successfully classified.
+
+Output: `outputs/triage_results.csv`
+
+**Conclusion:** The final triage process successfully classified eligible tickets, handled invalid and unprocessable inputs, respected the token budget, and routed tickets using classification results and customer segmentation. All 164 tickets were included in the final output, with zero failed tickets in the final run.
