@@ -15,3 +15,6 @@ __pycache__/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Generated visualisation - not part of submission
+outputs/*.png
